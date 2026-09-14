@@ -92,6 +92,9 @@ app.get("/api/compare", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
+app.get("/health", (_req, res) => {
+  res.status(200).json({ ok: true, service: "compare", time: new Date().toISOString() });
+});
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
 });
