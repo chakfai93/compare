@@ -18,7 +18,7 @@ const TZ = "Asia/Hong_Kong";
 
 function findHkjcOpening(rows) {
   const hkjc = rows
-    .filter((r) => r.bookmaker.toLowerCase() === "hkjc")
+    .filter((r) => String(r.bookmaker || "").toLowerCase() === "hkjc")
     .sort((a, b) => dayjs(a.time).valueOf() - dayjs(b.time).valueOf());
   return hkjc[0] || null;
 }
@@ -26,18 +26,23 @@ function findHkjcOpening(rows) {
 function find18betNearestBeforeT0(rows, t0Iso) {
   const t0 = dayjs(t0Iso).valueOf();
   const arr = rows
-    .filter((r) => r.bookmaker.toLowerCase() === "18bet")
+    .filter((r) => String(r.bookmaker || "").toLowerCase() === "18bet")
     .filter((r) => dayjs(r.time).valueOf() <= t0)
     .sort((a, b) => dayjs(b.time).valueOf() - dayjs(a.time).valueOf());
   return arr[0] || null;
 }
 
-function buildResult(matchId, hkjcOpening, b18) {
+function buildResult(matchId, hkjcOpening, b18, extra = {}) {
   if (!hkjcOpening) {
-    return { matchId, error: "HKJC opening not found" };
+    return { matchId, error: "HKJC opening not found", ...extra };
   }
   if (!b18) {
-    return { matchId, hkjc_opening: hkjcOpening, error: "18bet record (<= T0) not found" };
+    return {
+      matchId,
+      hkjc_opening: hkjcOpening,
+      error: "18bet record (<= T0) not found",
+      ...extra
+    };
   }
 
   const sec = dayjs(hkjcOpening.time).diff(dayjs(b18.time), "second");
@@ -52,50 +57,87 @@ function buildResult(matchId, hkjcOpening, b18) {
     meta: {
       provider: "qiutan",
       rule: "18bet_time <= HKJC_T0 and nearest"
-    }
+    },
+    ...extra
   };
 }
 
 app.get("/api/matches/today", async (_req, res) => {
-  const today = dayjs().tz(TZ).format("YYYY-MM-DD");
-  // TODO: 未接球探當天賽事前，先回示例
-  res.json({
-    date: today,
-    matches: [
-      {
-        matchId: "1234567",
-        league: "Demo League",
-        home: "Home",
-        away: "Away",
-        kickoff: `${today}T20:00:00+08:00`
-      }
-    ]
-  });
+  try {
+    const today = dayjs().tz(TZ).format("YYYY-MM-DD");
+    res.json({
+      date: today,
+      matches: [
+        {
+          matchId: "2993786",
+          league: "Demo League",
+          home: "Home",
+          away: "Away",
+          kickoff: `${today}T20:00:00+08:00`
+        }
+      ]
+    });
+  } catch (e) {
+    res.status(500).json({ error: "matches_today_failed", message: String(e?.message || e) });
+  }
 });
 
 app.get("/api/compare", async (req, res) => {
   const matchId = String(req.query.matchId || "").trim();
   if (!matchId) return res.status(400).json({ error: "matchId is required" });
 
-  const browser = await chromium.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
-  });
+  let browser;
+  let launchOk = false;
+  let rows = [];
+
   try {
-    const rows = await fetchQiutanAsianOddsHistory({ browser, matchId, tz: TZ });
+    browser = await chromium.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+    });
+    launchOk = true;
+
+    rows = await fetchQiutanAsianOddsHistory({ browser, matchId, tz: TZ });
+
     const hkjcOpening = findHkjcOpening(rows);
     const b18 = hkjcOpening ? find18betNearestBeforeT0(rows, hkjcOpening.time) : null;
-    const result = buildResult(matchId, hkjcOpening, b18);
-    res.json(result);
+
+    const result = buildResult(matchId, hkjcOpening, b18, {
+      debug: {
+        launchOk,
+        rowsCount: rows.length,
+        sample: rows.slice(0, 5)
+      }
+    });
+
+    return res.json(result);
   } catch (e) {
-    res.status(500).json({ error: "internal_error", message: String(e.message || e) });
+    return res.status(500).json({
+      error: "compare_failed",
+      message: String(e?.message || e),
+      debug: {
+        launchOk,
+        rowsCount: rows.length,
+        sample: rows.slice(0, 3)
+      }
+    });
   } finally {
-    await browser.close();
+    try {
+      if (browser) await browser.close();
+    } catch {}
   }
 });
 
 app.get("/health", (_req, res) => {
   res.status(200).json({ ok: true, service: "compare", time: new Date().toISOString() });
+});
+
+// 全域防崩（避免 Render 直接 502）
+process.on("unhandledRejection", (reason) => {
+  console.error("[unhandledRejection]", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[uncaughtException]", err);
 });
 
 const PORT = process.env.PORT || 3000;
