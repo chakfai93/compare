@@ -1,130 +1,114 @@
 import dayjs from "dayjs";
+import utc from "dayjs/plugin/utc.js";
+import timezone from "dayjs/plugin/timezone.js";
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
 
 /**
- * 解析球探 AsianOdds_n 頁面
- * 目標輸出:
- * [{ bookmaker, time, line, water }]
+ * Parse Asian odds history from Qiutan with resilient selectors + text fallback.
+ * Returns rows:
+ * { bookmaker, homeHandicap, awayHandicap, homeOdds, awayOdds, time }
  */
-export async function fetchQiutanAsianOddsHistory({ browser, matchId, tz }) {
+export async function fetchQiutanAsianOddsHistory({ browser, matchId, tz = "Asia/Hong_Kong" }) {
+  const url = `https://vip.win007.com/changeDetail/handicap.aspx?id=${encodeURIComponent(matchId)}&companyid=3`;
+
   const page = await browser.newPage();
-  const url = `https://vip.titan007.com/AsianOdds_n.aspx?id=${matchId}`;
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
 
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+  // allow dynamic table render
+  await page.waitForTimeout(2500);
 
-  // 等一下讓動態內容渲染
-  await page.waitForTimeout(1500);
+  const rows = await page.evaluate((timezoneName) => {
+    const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
 
-  const rows = await page.evaluate(() => {
-    const text = (el) => (el?.textContent || "").replace(/\s+/g, " ").trim();
+    const normalizeBookmaker = (name) => {
+      const n = clean(name).toLowerCase();
+      if (!n) return "";
+      if (n.includes("hkjc") || n.includes("香港") || n.includes("香港马会")) return "hkjc";
+      if (n.includes("18bet") || n.includes("18 bet") || n.includes("18bet体育") || n.includes("eighteen")) return "18bet";
+      return clean(name);
+    };
 
-    // 可能的資料表（不同版型/語系）
-    const tableCandidates = Array.from(document.querySelectorAll("table"));
+    const parseTime = (s) => {
+      const t = clean(s);
+      if (!t) return null;
+      // expected like: 09-14 19:35 or 2026-09-14 19:35
+      const full = /^\d{4}-\d{2}-\d{2}/.test(t) ? t : `${new Date().getFullYear()}-${t}`;
+      const d = new Date(full.replace(/-/g, "/"));
+      if (Number.isNaN(d.getTime())) return null;
+      return d.toISOString();
+    };
 
-    // 嘗試找包含公司名與時間欄位的表
-    const targetTables = tableCandidates.filter((tb) => {
-      const t = text(tb).toLowerCase();
-      return (
-        (t.includes("hkjc") || t.includes("香港馬會") || t.includes("18bet")) &&
-        (t.includes(":") || t.includes("時間") || t.includes("time"))
-      );
-    });
+    const parseLineFromCells = (cells) => {
+      if (!cells || cells.length < 3) return null;
+      const vals = cells.map((c) => clean(c.textContent || ""));
+      const joined = vals.join(" | ");
 
-    const pickedTables = targetTables.length ? targetTables : tableCandidates;
+      // bookmaker likely in first 1-2 columns
+      const bookmakerRaw = vals.find((v) => /hkjc|香港|香港马会|18\s*bet/i.test(v)) || vals[0] || "";
+      const bookmaker = normalizeBookmaker(bookmakerRaw);
+
+      // time usually last column containing date-time
+      const timeRaw = [...vals].reverse().find((v) => /\d{1,2}[-\/]\d{1,2}\s+\d{1,2}:\d{2}|\d{4}[-\/]\d{1,2}[-\/]\d{1,2}\s+\d{1,2}:\d{2}/.test(v)) || "";
+      const time = parseTime(timeRaw);
+
+      // find odds-like numbers
+      const nums = joined.match(/-?\d+(?:\.\d+)?/g) || [];
+      // heuristic positions; keep nullable
+      const homeOdds = nums.length >= 2 ? Number(nums[nums.length - 2]) : null;
+      const awayOdds = nums.length >= 1 ? Number(nums[nums.length - 1]) : null;
+      const homeHandicap = nums.length >= 4 ? Number(nums[nums.length - 4]) : null;
+      const awayHandicap = nums.length >= 3 ? Number(nums[nums.length - 3]) : null;
+
+      if (!bookmaker || !time) return null;
+      return { bookmaker, homeHandicap, awayHandicap, homeOdds, awayOdds, time, _raw: vals };
+    };
 
     const out = [];
 
-    for (const tb of pickedTables) {
-      const trs = Array.from(tb.querySelectorAll("tr"));
-      for (const tr of trs) {
-        const tds = Array.from(tr.querySelectorAll("td"));
-        if (tds.length < 4) continue;
+    // Path A: table rows
+    const trNodes = Array.from(document.querySelectorAll("table tr"));
+    for (const tr of trNodes) {
+      const cells = Array.from(tr.querySelectorAll("td"));
+      const row = parseLineFromCells(cells);
+      if (row) out.push(row);
+    }
 
-        const cols = tds.map((x) => text(x));
-        const rowText = cols.join(" | ").toLowerCase();
+    // Path B fallback: div/li rows that look like odds lines
+    if (out.length === 0) {
+      const candidates = Array.from(document.querySelectorAll("div, li, p"));
+      for (const node of candidates) {
+        const txt = clean(node.textContent || "");
+        if (!txt) continue;
+        if (!/(hkjc|香港|香港马会|18\s*bet)/i.test(txt)) continue;
+        if (!/(\d{1,2}[-\/]\d{1,2}\s+\d{1,2}:\d{2}|\d{4}[-\/]\d{1,2}[-\/]\d{1,2}\s+\d{1,2}:\d{2})/.test(txt)) continue;
 
-        // 書商判定
-        let bookmaker = "";
-        if (rowText.includes("hkjc") || rowText.includes("香港馬會")) bookmaker = "HKJC";
-        if (rowText.includes("18bet")) bookmaker = "18bet";
-        if (!bookmaker) continue;
-
-        // 嘗試從欄位抓時間（形如 YYYY-MM-DD HH:mm 或 HH:mm:ss）
-        let timeStr = "";
-        for (const c of cols) {
-          if (
-            /\d{4}[-/]\d{1,2}[-/]\d{1,2}\s+\d{1,2}:\d{2}(:\d{2})?/.test(c) ||
-            /\d{1,2}[-/]\d{1,2}\s+\d{1,2}:\d{2}(:\d{2})?/.test(c)
-          ) {
-            timeStr = c;
-            break;
-          }
-        }
-
-        // line / water 啟發式抓法
-        // 常見盤口像: -0.5, 受半球, 平手/半球, 0/0.5
-        let line = "";
-        const lineRegex = /(^|[^0-9])([+-]?\d+(\.\d+)?(\/\d+(\.\d+)?)?|平手\/半球|半球\/一球|受平手\/半球|受半球|平手|半球|一球)([^0-9]|$)/;
-        for (const c of cols) {
-          const m = c.match(lineRegex);
-          if (m) {
-            line = m[2];
-            break;
-          }
-        }
-
-        // 水位常見 0.82 1.04 0.94
-        let water = "";
-        for (const c of cols) {
-          const m = c.match(/\b(0\.\d{2}|1\.\d{2})\b/);
-          if (m) {
-            water = m[1];
-            break;
-          }
-        }
-
-        if (bookmaker && timeStr) {
-          out.push({
-            bookmaker,
-            time: timeStr,
-            line: line || "",
-            water: water || ""
-          });
-        }
+        const pseudoCells = txt.split(/[|｜\t]/g).map((x) => ({ textContent: x }));
+        const row = parseLineFromCells(pseudoCells);
+        if (row) out.push(row);
       }
     }
 
-    return out;
-  });
+    // normalize + dedupe simple key
+    const uniq = new Map();
+    for (const r of out) {
+      const key = `${r.bookmaker}__${r.time}__${r.homeOdds ?? ""}__${r.awayOdds ?? ""}`;
+      if (!uniq.has(key)) uniq.set(key, r);
+    }
 
-  // 時間正規化
-  const normalized = rows
-    .map((r) => {
-      const raw = String(r.time || "").trim();
-
-      // 支援 2026-09-14 10:05 / 09-14 10:05 這類格式
-      let d = null;
-      const full = dayjs(raw);
-      if (full.isValid()) d = full;
-
-      if (!d || !d.isValid()) {
-        // 若沒有年份，補今年
-        const m = raw.match(/^(\d{1,2})[-/](\d{1,2})\s+(\d{1,2}:\d{2}(:\d{2})?)$/);
-        if (m) {
-          const year = dayjs().year();
-          d = dayjs(`${year}-${m[1]}-${m[2]} ${m[3]}`);
-        }
-      }
-
-      if (!d || !d.isValid()) return null;
-
-      return {
+    return Array.from(uniq.values())
+      .map((r) => ({
         bookmaker: r.bookmaker,
-        time: d.tz ? d.tz(tz).toISOString() : d.toISOString(),
-        line: String(r.line ?? "").trim(),
-        water: String(r.water ?? "").trim()
-      };
-    })
-    .filter(Boolean);
+        homeHandicap: r.homeHandicap,
+        awayHandicap: r.awayHandicap,
+        homeOdds: r.homeOdds,
+        awayOdds: r.awayOdds,
+        time: r.time
+      }))
+      .sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
+  }, tz);
 
-  return normalized;
+  await page.close();
+  return rows;
 }
