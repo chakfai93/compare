@@ -3,9 +3,7 @@ services:
     name: compare
     runtime: node
     plan: free
-    buildCommand: |
-      npm install
-      npx playwright install --with-deps chromium
+    buildCommand: npm install
     startCommand: npm start
     envVars:
       - key: NODE_VERSION
