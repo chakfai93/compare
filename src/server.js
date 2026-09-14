@@ -77,7 +77,10 @@ app.get("/api/compare", async (req, res) => {
   const matchId = String(req.query.matchId || "").trim();
   if (!matchId) return res.status(400).json({ error: "matchId is required" });
 
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+  });
   try {
     const rows = await fetchQiutanAsianOddsHistory({ browser, matchId, tz: TZ });
     const hkjcOpening = findHkjcOpening(rows);
@@ -91,10 +94,11 @@ app.get("/api/compare", async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
 app.get("/health", (_req, res) => {
   res.status(200).json({ ok: true, service: "compare", time: new Date().toISOString() });
 });
+
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
 });

@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: compare
+    runtime: node
+    plan: free
+    buildCommand: |
+      npm install
+      npx playwright install --with-deps chromium
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: /opt/render/.cache/ms-playwright
