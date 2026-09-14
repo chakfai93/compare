@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HKJC vs 18bet 比對</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; max-width: 900px; }
+    input, button, select { padding: 8px 10px; margin-right: 8px; margin-bottom: 10px; }
+    pre { background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 8px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <h2>亞盤走勢比對（球探）</h2>
+
+  <input id="matchId" placeholder="輸入賽事 ID" />
+  <button id="btnCompare">比對</button>
+  <button id="btnToday">抓今天賽事</button>
+  <br />
+  <select id="matchSelect">
+    <option value="">-- 從今日賽事選擇 --</option>
+  </select>
+
+  <pre id="out">{}</pre>
+
+  <script>
+    const out = document.getElementById("out");
+    const matchIdEl = document.getElementById("matchId");
+    const matchSelect = document.getElementById("matchSelect");
+
+    async function compare(matchId) {
+      const r = await fetch(`/api/compare?matchId=${encodeURIComponent(matchId)}`);
+      const data = await r.json();
+      out.textContent = JSON.stringify(data, null, 2);
+    }
+
+    document.getElementById("btnCompare").onclick = async () => {
+      const id = matchIdEl.value.trim() || matchSelect.value;
+      if (!id) return alert("請輸入或選擇 matchId");
+      await compare(id);
+    };
+
+    document.getElementById("btnToday").onclick = async () => {
+      const r = await fetch("/api/matches/today");
+      const data = await r.json();
+      matchSelect.innerHTML = `<option value="">-- 從今日賽事選擇 --</option>`;
+      (data.matches || []).forEach((m) => {
+        const op = document.createElement("option");
+        op.value = m.matchId;
+        op.textContent = `${m.matchId} | ${m.league} | ${m.home} vs ${m.away} | ${m.kickoff}`;
+        matchSelect.appendChild(op);
+      });
+      out.textContent = JSON.stringify(data, null, 2);
+    };
+  </script>
+</body>
+</html>
